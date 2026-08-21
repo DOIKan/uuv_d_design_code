@@ -5,7 +5,7 @@ from scipy.spatial import ConvexHull
 from scipy.optimize import linprog
 
 # ==========================================
-# 1. 物理パラメータ・構成設定
+# 1. 物理パラメータ・構成設定 (仕様そのまま)
 # ==========================================
 # 7リンクのパラメータ: 長さ[m], 質量[kg], 体積[m^3]
 link_lengths = [0.15, 0.05, 0.40, 0.35, 0.40, 0.05, 0.15]
@@ -18,19 +18,17 @@ actuator_masses = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
 joint_limits = [(-135, 135), (-180, 180), (-90, 90), (-90, 90), (-180, 180), (-135, 135)] 
 
 # スラスターパラメータ (6個)
-max_thrust = 15.0   # 各スラスターの最大推力 [N]
-sigma = 0.0036      # ドラグモーメント係数
+max_thrust = 15.0   
+sigma = 0.0036      
 thruster_directions = [1, -1, 1, -1, 1, -1] 
 
-# ★ 変更点：各スラスターの属するリンク
-# 0: Link1, 1: Link2, 2: Link3, 3: Link4, 4: Link5, 5: Link6, 6: Link7
+# 各スラスターの属するリンク
 belonging_links = [0, 2, 2, 4, 4, 6] 
 
 # 環境定数
 rho_water = 1000.0  
 g_const = 9.81      
 
-# 回転行列
 def rot_y(rad):
     c, s = np.cos(rad), np.sin(rad)
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
@@ -104,20 +102,18 @@ def update_kinematics(joint_angles, base_rpy):
     for i in range(7): cob_num += link_volumes[i] * link_centers[i]
     r_CoB = cob_num / total_volume
     
+    # ★ 変更点：重力と浮力を個別のベクトルとして抽出
     F_g = np.array([0, 0, -total_mass * g_const])
     F_b = np.array([0, 0, rho_water * g_const * total_volume])
-    tau_b = np.cross(r_CoB - r_CoM, F_b)
-    W_env = np.concatenate([F_g + F_b, tau_b])
     
-    # ★ 変更点：スラスターのローカル位置
     thruster_positions = []
     loc_positions = [
-        np.array([link_lengths[0]/2.0, 0, 0]),  # T1: Link1 中央
-        np.array([0, 0, 0]),                    # T2: Link3 始端 (Link2側)
-        np.array([link_lengths[2], 0, 0]),      # T3: Link3 終端 (Link4側)
-        np.array([0, 0, 0]),                    # T4: Link5 始端 (Link4側)
-        np.array([link_lengths[4], 0, 0]),      # T5: Link5 終端 (Link6側)
-        np.array([link_lengths[6]/2.0, 0, 0])   # T6: Link7 中央
+        np.array([link_lengths[0]/2.0, 0, 0]),  # T1
+        np.array([0, 0, 0]),                    # T2
+        np.array([link_lengths[2], 0, 0]),      # T3
+        np.array([0, 0, 0]),                    # T4
+        np.array([link_lengths[4], 0, 0]),      # T5
+        np.array([link_lengths[6]/2.0, 0, 0])   # T6
     ]
     
     for k in range(6):
@@ -125,16 +121,16 @@ def update_kinematics(joint_angles, base_rpy):
         R_l, P_l = link_frames[l_idx]
         thruster_positions.append(P_l + R_l @ loc_positions[k])
         
-    return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions)
+    return link_frames, joint_positions, r_CoM, r_CoB, F_g, F_b, np.array(thruster_positions)
 
-def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env):
+# ★ 変更点：エンドエフェクタ先端(EE)を基準とした力空間の計算
+def compute_ee_force_space(r_CoM, r_CoB, link_frames, thr_pos, t2_angle, t5_angle, F_g, F_b):
     num_divs = 12
-    # ★ 変更点：1, 3, 4, 6番目のスラスターを可動(全方位)とする
     var_tilt_k = [0, 2, 3, 5] 
     
     num_vars = len(var_tilt_k) * num_divs + 2 
-    A_eq = np.zeros((3, num_vars))
-    M_matrix = np.zeros((3, num_vars))
+    F_matrix = np.zeros((3, num_vars))
+    M_matrix_ee = np.zeros((3, num_vars)) # ★ 重心ではなくエンドエフェクタ回りのモーメント
     A_ub = np.zeros((len(var_tilt_k), num_vars))
     b_ub = np.ones(len(var_tilt_k))
     bounds = []
@@ -142,66 +138,74 @@ def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
     var_idx = 0
     ub_idx = 0
     
+    # エンドエフェクタ（1番目のリンクの始端）の座標を取得
+    P_ee = link_frames[0][1]
+    
     for k in range(6):
         l_idx = belonging_links[k]
         R_l, _ = link_frames[l_idx]
-        p_vec = thr_pos[k] - r_CoM
+        
+        # モーメントアームの基準をEEに変更
+        p_vec_ee = thr_pos[k] - P_ee 
         
         if k in var_tilt_k:
-            # 任意の角度（全組み合わせの凸包表現）
             for i in range(num_divs):
                 phi = 2 * np.pi * i / num_divs
                 n_local = np.array([0, -np.sin(phi), np.cos(phi)])
                 n_global = R_l @ n_local
                 
                 F_vec = max_thrust * n_global
-                M_vec = np.cross(p_vec, F_vec) + sigma * thruster_directions[k] * F_vec
+                # EE回りのモーメントとして計算
+                M_vec = np.cross(p_vec_ee, F_vec) + sigma * thruster_directions[k] * F_vec
                 
-                A_eq[:, var_idx] = F_vec
-                M_matrix[:, var_idx] = M_vec
-                A_ub[ub_idx, var_idx] = 1.0 # 係数の和制約
+                F_matrix[:, var_idx] = F_vec
+                M_matrix_ee[:, var_idx] = M_vec
+                A_ub[ub_idx, var_idx] = 1.0 
                 bounds.append((0, 1.0))
                 var_idx += 1
             ub_idx += 1
         else:
-            # ★ 変更点：固定チルト（T2, T5）
             tilt = t2_angle if k == 1 else t5_angle
             n_local = rot_x(tilt) @ np.array([0, 0, 1])
             n_global = R_l @ n_local
             
             F_unit = n_global
-            M_unit = np.cross(p_vec, F_unit) + sigma * thruster_directions[k] * F_unit
+            M_unit = np.cross(p_vec_ee, F_unit) + sigma * thruster_directions[k] * F_unit
             
-            A_eq[:, var_idx] = F_unit
-            M_matrix[:, var_idx] = M_unit
-            bounds.append((-max_thrust, max_thrust)) # 両方向推力
+            F_matrix[:, var_idx] = F_unit
+            M_matrix_ee[:, var_idx] = M_unit
+            bounds.append((-max_thrust, max_thrust)) 
             var_idx += 1
             
-    b_eq = -W_env[:3]
-    tau_env = W_env[3:]
+    # ★ EE回りでの環境モーメント（重力・浮力がEEに対して生む回転力）
+    tau_env_ee = np.cross(r_CoM - P_ee, F_g) + np.cross(r_CoB - P_ee, F_b)
     
-    # 空間のサンプリング
+    # 制約条件：EE回りのモーメント合計がゼロになること（姿勢を維持する条件）
+    A_eq = M_matrix_ee
+    b_eq = -tau_env_ee
+    F_env = F_g + F_b
+    
     n_phi, n_theta = 14, 7
     phi_vals = np.linspace(0, 2*np.pi, n_phi)
     theta_vals = np.linspace(-np.pi/2, np.pi/2, n_theta)
-    torque_points = []
+    force_points = []
     
     for phi in phi_vals:
         for theta in theta_vals:
-            n_tau = np.array([np.cos(theta)*np.cos(phi), np.cos(theta)*np.sin(phi), np.sin(theta)])
-            c = - M_matrix.T @ n_tau
+            n_f = np.array([np.cos(theta)*np.cos(phi), np.cos(theta)*np.sin(phi), np.sin(theta)])
+            c = - F_matrix.T @ n_f 
             
             res = linprog(c, A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
             if res.success:
-                M_net = M_matrix @ res.x + tau_env
-                torque_points.append(M_net)
+                F_net = F_matrix @ res.x + F_env
+                force_points.append(F_net)
                 
-    if len(torque_points) < 4: return None
-    torque_points = np.unique(np.round(torque_points, 5), axis=0)
-    if len(torque_points) < 4: return None
+    if len(force_points) < 4: return None
+    force_points = np.unique(np.round(force_points, 5), axis=0)
+    if len(force_points) < 4: return None
     
     try:
-        return ConvexHull(torque_points)
+        return ConvexHull(force_points)
     except:
         return None
 
@@ -212,16 +216,14 @@ fig = plt.figure(figsize=(16, 9))
 plt.subplots_adjust(bottom=0.35, left=0.05, right=0.95, wspace=0.2)
 
 ax_robot = fig.add_subplot(121, projection='3d')
-ax_torque = fig.add_subplot(122, projection='3d')
+ax_force = fig.add_subplot(122, projection='3d')
 
-# スライダーの配置
 sliders_j = []
 for i in range(6):
     ax_sj = plt.axes([0.08, 0.28 - i*0.04, 0.35, 0.02])
     lim = joint_limits[i]
     sliders_j.append(Slider(ax_sj, f'Joint {i+1} ({joint_types[i]})', lim[0], lim[1], valinit=0.0, valfmt='%1.1f°'))
     
-# ★ 変更点：右側のスライダー (固定チルト T2 と T5 + ベース姿勢)
 ax_t2 = plt.axes([0.55, 0.28, 0.35, 0.02])
 slider_t2 = Slider(ax_t2, 'Tilt 2 (Fixed)', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
 ax_t5 = plt.axes([0.55, 0.24, 0.35, 0.02])
@@ -236,15 +238,15 @@ slider_yaw = Slider(ax_y, 'Base4 Yaw', -180.0, 180.0, valinit=0.0, valfmt='%1.1f
 
 def draw_scene(val=None):
     ax_robot.cla()
-    ax_torque.cla()
+    ax_force.cla()
     
     j_angles = [np.radians(s.val) for s in sliders_j]
     t2_angle = np.radians(slider_t2.val)
     t5_angle = np.radians(slider_t5.val)
     base_rpy = [np.radians(slider_roll.val), np.radians(slider_pitch.val), np.radians(slider_yaw.val)]
     
-    link_frames, j_pos, r_CoM, r_CoB, W_env, thr_pos = update_kinematics(j_angles, base_rpy)
-    hull = compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
+    link_frames, j_pos, r_CoM, r_CoB, F_g, F_b, thr_pos = update_kinematics(j_angles, base_rpy)
+    hull = compute_ee_force_space(r_CoM, r_CoB, link_frames, thr_pos, t2_angle, t5_angle, F_g, F_b)
     
     # --- 左画面: ロボットモデル ---
     for i in range(7):
@@ -253,6 +255,10 @@ def draw_scene(val=None):
         color = 'darkgreen' if i == 3 else 'navy'
         ax_robot.plot([P_l[0], P_end[0]], [P_l[1], P_end[1]], [P_l[2], P_end[2]], 'o-', color=color, lw=4, ms=6)
     
+    # ★ エンドエフェクタ(1番目リンクの先端)を金色の星マークで強調表示
+    P_ee = link_frames[0][1]
+    ax_robot.scatter(P_ee[0], P_ee[1], P_ee[2], color='gold', marker='*', s=300, edgecolors='black', label='End-Effector', zorder=5)
+    
     if len(j_pos) > 0:
         j_pos = np.array(j_pos)
         ax_robot.scatter(j_pos[:,0], j_pos[:,1], j_pos[:,2], color='darkorange', s=60, label='Actuators')
@@ -260,14 +266,12 @@ def draw_scene(val=None):
     ax_robot.scatter(r_CoM[0], r_CoM[1], r_CoM[2], color='red', marker='x', s=100, lw=3, label='CoM')
     ax_robot.scatter(r_CoB[0], r_CoB[1], r_CoB[2], color='cyan', marker='o', s=100, edgecolors='b', label='CoB')
     
-    # スラスターの描画
     var_tilt_k = [0, 2, 3, 5]
     for k in range(6):
         R_l, P_l = link_frames[belonging_links[k]]
         pos = thr_pos[k]
         
         if k in var_tilt_k:
-            # 任意の角度に向けるスラスターはピンクの円盤（ディスク）として描画
             circle_pts = []
             for i in range(13):
                 phi = 2 * np.pi * i / 12
@@ -279,14 +283,11 @@ def draw_scene(val=None):
             
             x_axis = R_l @ np.array([1, 0, 0])
             ax_robot.quiver(pos[0], pos[1], pos[2], x_axis[0], x_axis[1], x_axis[2], length=0.08, color='gray', lw=1)
-            ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (All)', color='black', fontsize=9)
         else:
-            # ★ 変更点：固定スラスター(T2, T5)は赤矢印で描画
             tilt = t2_angle if k == 1 else t5_angle
             n_loc = rot_x(tilt) @ np.array([0, 0, 1])
             n_glob = R_l @ n_loc
             ax_robot.quiver(pos[0], pos[1], pos[2], n_glob[0], n_glob[1], n_glob[2], length=0.15, color='crimson', lw=2)
-            ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (Fix)', color='black', fontsize=9)
             
     ax_robot.set_title("Underwater Robot Model (Base: Link 4)")
     ax_robot.set_xlabel("X [m]"), ax_robot.set_ylabel("Y [m]"), ax_robot.set_zlabel("Z [m]")
@@ -294,26 +295,26 @@ def draw_scene(val=None):
     ax_robot.grid(True)
     ax_robot.legend(loc='upper left')
     
-    # --- 右画面: トルク空間 ---
+    # --- 右画面: エンドエフェクタ力空間 ---
     if hull is not None:
-        ax_torque.plot_trisurf(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2],
-                               triangles=hull.simplices, alpha=0.4, color='turquoise', edgecolor='teal', linewidth=0.5)
-        ax_torque.scatter(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2], s=10, color='darkcyan')
-        ax_torque.scatter(0, 0, 0, color='magenta', marker='*', s=150, label='Net Zero Torque')
-        ax_torque.legend()
+        ax_force.plot_trisurf(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2],
+                               triangles=hull.simplices, alpha=0.4, color='orange', edgecolor='chocolate', linewidth=0.5)
+        ax_force.scatter(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2], s=10, color='darkorange')
+        ax_force.scatter(0, 0, 0, color='magenta', marker='*', s=150, label='Net Zero Force')
+        ax_force.legend()
         
         pts = hull.points
         max_range = np.array([pts[:,0].max()-pts[:,0].min(), pts[:,1].max()-pts[:,1].min(), pts[:,2].max()-pts[:,2].min()]).max() / 2.0 + 0.1
         mid_x, mid_y, mid_z = (pts[:,0].max()+pts[:,0].min())*0.5, (pts[:,1].max()+pts[:,1].min())*0.5, (pts[:,2].max()+pts[:,2].min())*0.5
-        ax_torque.set_xlim(mid_x - max_range, mid_x + max_range)
-        ax_torque.set_ylim(mid_y - max_range, mid_y + max_range)
-        ax_torque.set_zlim(mid_z - max_range, mid_z + max_range)
+        ax_force.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax_force.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax_force.set_zlim(mid_z - max_range, mid_z + max_range)
     else:
-        ax_torque.text(0.5, 0.5, 0.5, "Hovering Impossible", color='red', ha='center', va='center', fontsize=12, transform=ax_torque.transAxes)
-        ax_torque.set_xlim(-1, 1), ax_torque.set_ylim(-1, 1), ax_torque.set_zlim(-1, 1)
+        ax_force.text(0.5, 0.5, 0.5, "EE Force Generation Impossible", color='red', ha='center', va='center', fontsize=12, transform=ax_force.transAxes)
+        ax_force.set_xlim(-1, 1), ax_force.set_ylim(-1, 1), ax_force.set_zlim(-1, 1)
 
-    ax_torque.set_title("Minkowski Sum Torque Space (All Combinations)")
-    ax_torque.set_xlabel("Torque Mx [Nm]"), ax_torque.set_ylabel("Torque My [Nm]"), ax_torque.set_zlabel("Torque Mz [Nm]")
+    ax_force.set_title("End-Effector Force Space\n(Posture Maintained, Net Torque = 0 around EE)")
+    ax_force.set_xlabel("EE Force Fx [N]"), ax_force.set_ylabel("EE Force Fy [N]"), ax_force.set_zlabel("EE Force Fz [N]")
     
     fig.canvas.draw_idle()
 

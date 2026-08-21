@@ -17,14 +17,15 @@ joint_types = ['P', 'R', 'P', 'P', 'R', 'P']
 actuator_masses = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5] 
 joint_limits = [(-135, 135), (-180, 180), (-90, 90), (-90, 90), (-180, 180), (-135, 135)] 
 
-# スラスターパラメータ (6個)
+# ★ 変更点：スラスターパラメータ (8個・ベクター配置)
+num_thrusters = 8
 max_thrust = 15.0   # 各スラスターの最大推力 [N]
 sigma = 0.0036      # ドラグモーメント係数
-thruster_directions = [1, -1, 1, -1, 1, -1] 
+# プロペラの回転方向 (反トルク相殺用)
+prop_spin = [1, -1, -1, 1, -1, 1, 1, -1] 
 
-# ★ 変更点：各スラスターの属するリンク
-# 0: Link1, 1: Link2, 2: Link3, 3: Link4, 4: Link5, 5: Link6, 6: Link7
-belonging_links = [0, 2, 2, 4, 4, 6] 
+# すべて4番目のリンク(インデックス3)に属する
+belonging_links = [3] * num_thrusters 
 
 # 環境定数
 rho_water = 1000.0  
@@ -109,73 +110,63 @@ def update_kinematics(joint_angles, base_rpy):
     tau_b = np.cross(r_CoB - r_CoM, F_b)
     W_env = np.concatenate([F_g + F_b, tau_b])
     
-    # ★ 変更点：スラスターのローカル位置
+    # ★ 変更点：4番目のリンク(胴体)の両端・ベクター配置計算
     thruster_positions = []
+    thruster_directions_global = []
+    
+    R_mount = 0.02  # 取り付けの半径オフセット[m]
+    L4 = link_lengths[3]
+    
+    # Link4のローカル座標系における位置 (始端4つ, 終端4つ)
     loc_positions = [
-        np.array([link_lengths[0]/2.0, 0, 0]),  # T1: Link1 中央
-        np.array([0, 0, 0]),                    # T2: Link3 始端 (Link2側)
-        np.array([link_lengths[2], 0, 0]),      # T3: Link3 終端 (Link4側)
-        np.array([0, 0, 0]),                    # T4: Link5 始端 (Link4側)
-        np.array([link_lengths[4], 0, 0]),      # T5: Link5 終端 (Link6側)
-        np.array([link_lengths[6]/2.0, 0, 0])   # T6: Link7 中央
+        np.array([0,  R_mount,  R_mount]),
+        np.array([0, -R_mount,  R_mount]),
+        np.array([0,  R_mount, -R_mount]),
+        np.array([0, -R_mount, -R_mount]),
+        np.array([L4,  R_mount,  R_mount]),
+        np.array([L4, -R_mount,  R_mount]),
+        np.array([L4,  R_mount, -R_mount]),
+        np.array([L4, -R_mount, -R_mount])
     ]
     
-    for k in range(6):
+    # Link4のローカル座標系における推力方向 (ベクター配置: 斜め45度方向など)
+    loc_directions = [
+        np.array([-1,  1,  1]) / np.sqrt(3),
+        np.array([-1, -1,  1]) / np.sqrt(3),
+        np.array([-1,  1, -1]) / np.sqrt(3),
+        np.array([-1, -1, -1]) / np.sqrt(3),
+        np.array([ 1,  1,  1]) / np.sqrt(3),
+        np.array([ 1, -1,  1]) / np.sqrt(3),
+        np.array([ 1,  1, -1]) / np.sqrt(3),
+        np.array([ 1, -1, -1]) / np.sqrt(3)
+    ]
+    
+    for k in range(num_thrusters):
         l_idx = belonging_links[k]
         R_l, P_l = link_frames[l_idx]
-        thruster_positions.append(P_l + R_l @ loc_positions[k])
         
-    return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions)
+        pos_global = P_l + R_l @ loc_positions[k]
+        dir_global = R_l @ loc_directions[k]
+        
+        thruster_positions.append(pos_global)
+        thruster_directions_global.append(dir_global)
+        
+    return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions), np.array(thruster_directions_global)
 
-def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env):
-    num_divs = 12
-    # ★ 変更点：1, 3, 4, 6番目のスラスターを可動(全方位)とする
-    var_tilt_k = [0, 2, 3, 5] 
+def compute_torque_space(r_CoM, thr_pos, thr_dir, W_env):
+    A_eq = np.zeros((3, num_thrusters))
+    M_matrix = np.zeros((3, num_thrusters))
+    bounds = [(-max_thrust, max_thrust) for _ in range(num_thrusters)]
     
-    num_vars = len(var_tilt_k) * num_divs + 2 
-    A_eq = np.zeros((3, num_vars))
-    M_matrix = np.zeros((3, num_vars))
-    A_ub = np.zeros((len(var_tilt_k), num_vars))
-    b_ub = np.ones(len(var_tilt_k))
-    bounds = []
-    
-    var_idx = 0
-    ub_idx = 0
-    
-    for k in range(6):
-        l_idx = belonging_links[k]
-        R_l, _ = link_frames[l_idx]
+    for k in range(num_thrusters):
         p_vec = thr_pos[k] - r_CoM
+        F_unit = thr_dir[k]
         
-        if k in var_tilt_k:
-            # 任意の角度（全組み合わせの凸包表現）
-            for i in range(num_divs):
-                phi = 2 * np.pi * i / num_divs
-                n_local = np.array([0, -np.sin(phi), np.cos(phi)])
-                n_global = R_l @ n_local
-                
-                F_vec = max_thrust * n_global
-                M_vec = np.cross(p_vec, F_vec) + sigma * thruster_directions[k] * F_vec
-                
-                A_eq[:, var_idx] = F_vec
-                M_matrix[:, var_idx] = M_vec
-                A_ub[ub_idx, var_idx] = 1.0 # 係数の和制約
-                bounds.append((0, 1.0))
-                var_idx += 1
-            ub_idx += 1
-        else:
-            # ★ 変更点：固定チルト（T2, T5）
-            tilt = t2_angle if k == 1 else t5_angle
-            n_local = rot_x(tilt) @ np.array([0, 0, 1])
-            n_global = R_l @ n_local
-            
-            F_unit = n_global
-            M_unit = np.cross(p_vec, F_unit) + sigma * thruster_directions[k] * F_unit
-            
-            A_eq[:, var_idx] = F_unit
-            M_matrix[:, var_idx] = M_unit
-            bounds.append((-max_thrust, max_thrust)) # 両方向推力
-            var_idx += 1
+        # モーメントの計算 (位置ベクトル × 力ベクトル + ドラッグトルク)
+        M_unit = np.cross(p_vec, F_unit) + sigma * prop_spin[k] * F_unit
+        
+        A_eq[:, k] = F_unit
+        M_matrix[:, k] = M_unit
             
     b_eq = -W_env[:3]
     tau_env = W_env[3:]
@@ -191,7 +182,7 @@ def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
             n_tau = np.array([np.cos(theta)*np.cos(phi), np.cos(theta)*np.sin(phi), np.sin(theta)])
             c = - M_matrix.T @ n_tau
             
-            res = linprog(c, A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+            res = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
             if res.success:
                 M_net = M_matrix @ res.x + tau_env
                 torque_points.append(M_net)
@@ -221,17 +212,12 @@ for i in range(6):
     lim = joint_limits[i]
     sliders_j.append(Slider(ax_sj, f'Joint {i+1} ({joint_types[i]})', lim[0], lim[1], valinit=0.0, valfmt='%1.1f°'))
     
-# ★ 変更点：右側のスライダー (固定チルト T2 と T5 + ベース姿勢)
-ax_t2 = plt.axes([0.55, 0.28, 0.35, 0.02])
-slider_t2 = Slider(ax_t2, 'Tilt 2 (Fixed)', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
-ax_t5 = plt.axes([0.55, 0.24, 0.35, 0.02])
-slider_t5 = Slider(ax_t5, 'Tilt 5 (Fixed)', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
-
-ax_r = plt.axes([0.55, 0.16, 0.35, 0.02])
+# ★ 変更点：ベース姿勢用のスライダーのみ配置 (固定チルト用のスライダーは削除)
+ax_r = plt.axes([0.55, 0.28, 0.35, 0.02])
 slider_roll = Slider(ax_r, 'Base4 Roll', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
-ax_p = plt.axes([0.55, 0.12, 0.35, 0.02])
+ax_p = plt.axes([0.55, 0.24, 0.35, 0.02])
 slider_pitch = Slider(ax_p, 'Base4 Pitch', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
-ax_y = plt.axes([0.55, 0.08, 0.35, 0.02])
+ax_y = plt.axes([0.55, 0.20, 0.35, 0.02])
 slider_yaw = Slider(ax_y, 'Base4 Yaw', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
 
 def draw_scene(val=None):
@@ -239,12 +225,10 @@ def draw_scene(val=None):
     ax_torque.cla()
     
     j_angles = [np.radians(s.val) for s in sliders_j]
-    t2_angle = np.radians(slider_t2.val)
-    t5_angle = np.radians(slider_t5.val)
     base_rpy = [np.radians(slider_roll.val), np.radians(slider_pitch.val), np.radians(slider_yaw.val)]
     
-    link_frames, j_pos, r_CoM, r_CoB, W_env, thr_pos = update_kinematics(j_angles, base_rpy)
-    hull = compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
+    link_frames, j_pos, r_CoM, r_CoB, W_env, thr_pos, thr_dir = update_kinematics(j_angles, base_rpy)
+    hull = compute_torque_space(r_CoM, thr_pos, thr_dir, W_env)
     
     # --- 左画面: ロボットモデル ---
     for i in range(7):
@@ -260,35 +244,23 @@ def draw_scene(val=None):
     ax_robot.scatter(r_CoM[0], r_CoM[1], r_CoM[2], color='red', marker='x', s=100, lw=3, label='CoM')
     ax_robot.scatter(r_CoB[0], r_CoB[1], r_CoB[2], color='cyan', marker='o', s=100, edgecolors='b', label='CoB')
     
-    # スラスターの描画
-    var_tilt_k = [0, 2, 3, 5]
-    for k in range(6):
-        R_l, P_l = link_frames[belonging_links[k]]
+    # ★ 変更点：スラスター（ベクター配置）の描画
+    R_l4, P_l4 = link_frames[3]
+    for k in range(num_thrusters):
         pos = thr_pos[k]
+        d_vec = thr_dir[k]
         
-        if k in var_tilt_k:
-            # 任意の角度に向けるスラスターはピンクの円盤（ディスク）として描画
-            circle_pts = []
-            for i in range(13):
-                phi = 2 * np.pi * i / 12
-                n_loc = np.array([0, -np.sin(phi), np.cos(phi)])
-                n_glob = R_l @ n_loc
-                circle_pts.append(pos + n_glob * 0.1)
-            circle_pts = np.array(circle_pts)
-            ax_robot.plot(circle_pts[:,0], circle_pts[:,1], circle_pts[:,2], color='magenta', alpha=0.6, lw=2)
-            
-            x_axis = R_l @ np.array([1, 0, 0])
-            ax_robot.quiver(pos[0], pos[1], pos[2], x_axis[0], x_axis[1], x_axis[2], length=0.08, color='gray', lw=1)
-            ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (All)', color='black', fontsize=9)
+        # スラスターの推力方向を赤矢印で描画
+        ax_robot.quiver(pos[0], pos[1], pos[2], d_vec[0], d_vec[1], d_vec[2], length=0.15, color='crimson', lw=2)
+        
+        # マウント用の支柱をグレーの点線で描画
+        if k < 4:
+            mount_base = P_l4
         else:
-            # ★ 変更点：固定スラスター(T2, T5)は赤矢印で描画
-            tilt = t2_angle if k == 1 else t5_angle
-            n_loc = rot_x(tilt) @ np.array([0, 0, 1])
-            n_glob = R_l @ n_loc
-            ax_robot.quiver(pos[0], pos[1], pos[2], n_glob[0], n_glob[1], n_glob[2], length=0.15, color='crimson', lw=2)
-            ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (Fix)', color='black', fontsize=9)
+            mount_base = P_l4 + R_l4 @ np.array([link_lengths[3], 0, 0])
+        ax_robot.plot([mount_base[0], pos[0]], [mount_base[1], pos[1]], [mount_base[2], pos[2]], color='gray', lw=1, linestyle='--')
             
-    ax_robot.set_title("Underwater Robot Model (Base: Link 4)")
+    ax_robot.set_title("Underwater Robot Model (8-Vectored on Link 4)")
     ax_robot.set_xlabel("X [m]"), ax_robot.set_ylabel("Y [m]"), ax_robot.set_zlabel("Z [m]")
     ax_robot.set_xlim(-1.5, 1.5), ax_robot.set_ylim(-1.5, 1.5), ax_robot.set_zlim(-1.5, 1.5)
     ax_robot.grid(True)
@@ -312,14 +284,12 @@ def draw_scene(val=None):
         ax_torque.text(0.5, 0.5, 0.5, "Hovering Impossible", color='red', ha='center', va='center', fontsize=12, transform=ax_torque.transAxes)
         ax_torque.set_xlim(-1, 1), ax_torque.set_ylim(-1, 1), ax_torque.set_zlim(-1, 1)
 
-    ax_torque.set_title("Minkowski Sum Torque Space (All Combinations)")
+    ax_torque.set_title("Minkowski Sum Torque Space (8-Vectored Setup)")
     ax_torque.set_xlabel("Torque Mx [Nm]"), ax_torque.set_ylabel("Torque My [Nm]"), ax_torque.set_zlabel("Torque Mz [Nm]")
     
     fig.canvas.draw_idle()
 
 for s in sliders_j: s.on_changed(draw_scene)
-slider_t2.on_changed(draw_scene)
-slider_t5.on_changed(draw_scene)
 slider_roll.on_changed(draw_scene)
 slider_pitch.on_changed(draw_scene)
 slider_yaw.on_changed(draw_scene)

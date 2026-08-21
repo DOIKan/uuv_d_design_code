@@ -22,7 +22,7 @@ max_thrust = 15.0   # 各スラスターの最大推力 [N]
 sigma = 0.0036      # ドラグモーメント係数
 thruster_directions = [1, -1, 1, -1, 1, -1] 
 
-# ★ 変更点：各スラスターの属するリンク
+# 各スラスターの属するリンク
 # 0: Link1, 1: Link2, 2: Link3, 3: Link4, 4: Link5, 5: Link6, 6: Link7
 belonging_links = [0, 2, 2, 4, 4, 6] 
 
@@ -107,9 +107,16 @@ def update_kinematics(joint_angles, base_rpy):
     F_g = np.array([0, 0, -total_mass * g_const])
     F_b = np.array([0, 0, rho_water * g_const * total_volume])
     tau_b = np.cross(r_CoB - r_CoM, F_b)
-    W_env = np.concatenate([F_g + F_b, tau_b])
     
-    # ★ 変更点：スラスターのローカル位置
+    # ★ 変更点：片方のエンドエフェクタ（Link1始端）に外力を適用
+    P_ee = link_frames[0][1]
+    F_ext = np.array([0.0, 0.0, -10.0]) # Z軸下向きに10N
+    tau_ext = np.cross(P_ee - r_CoM, F_ext) # 重心回りの外力モーメント
+    
+    # 環境負荷全体（重力 + 浮力 + 外力）を合成
+    W_env = np.concatenate([F_g + F_b + F_ext, tau_b + tau_ext])
+    
+    # スラスターのローカル位置
     thruster_positions = []
     loc_positions = [
         np.array([link_lengths[0]/2.0, 0, 0]),  # T1: Link1 中央
@@ -125,11 +132,10 @@ def update_kinematics(joint_angles, base_rpy):
         R_l, P_l = link_frames[l_idx]
         thruster_positions.append(P_l + R_l @ loc_positions[k])
         
-    return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions)
+    return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions), P_ee
 
 def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env):
     num_divs = 12
-    # ★ 変更点：1, 3, 4, 6番目のスラスターを可動(全方位)とする
     var_tilt_k = [0, 2, 3, 5] 
     
     num_vars = len(var_tilt_k) * num_divs + 2 
@@ -164,7 +170,7 @@ def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
                 var_idx += 1
             ub_idx += 1
         else:
-            # ★ 変更点：固定チルト（T2, T5）
+            # 固定チルト（T2, T5）
             tilt = t2_angle if k == 1 else t5_angle
             n_local = rot_x(tilt) @ np.array([0, 0, 1])
             n_global = R_l @ n_local
@@ -221,7 +227,7 @@ for i in range(6):
     lim = joint_limits[i]
     sliders_j.append(Slider(ax_sj, f'Joint {i+1} ({joint_types[i]})', lim[0], lim[1], valinit=0.0, valfmt='%1.1f°'))
     
-# ★ 変更点：右側のスライダー (固定チルト T2 と T5 + ベース姿勢)
+# 右側のスライダー (固定チルト T2 と T5 + ベース姿勢)
 ax_t2 = plt.axes([0.55, 0.28, 0.35, 0.02])
 slider_t2 = Slider(ax_t2, 'Tilt 2 (Fixed)', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
 ax_t5 = plt.axes([0.55, 0.24, 0.35, 0.02])
@@ -243,7 +249,7 @@ def draw_scene(val=None):
     t5_angle = np.radians(slider_t5.val)
     base_rpy = [np.radians(slider_roll.val), np.radians(slider_pitch.val), np.radians(slider_yaw.val)]
     
-    link_frames, j_pos, r_CoM, r_CoB, W_env, thr_pos = update_kinematics(j_angles, base_rpy)
+    link_frames, j_pos, r_CoM, r_CoB, W_env, thr_pos, P_ee = update_kinematics(j_angles, base_rpy)
     hull = compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
     
     # --- 左画面: ロボットモデル ---
@@ -260,6 +266,10 @@ def draw_scene(val=None):
     ax_robot.scatter(r_CoM[0], r_CoM[1], r_CoM[2], color='red', marker='x', s=100, lw=3, label='CoM')
     ax_robot.scatter(r_CoB[0], r_CoB[1], r_CoB[2], color='cyan', marker='o', s=100, edgecolors='b', label='CoB')
     
+    # ★ 変更点：エンドエフェクタ位置の強調と、外力（10N）のベクトルを描画
+    ax_robot.scatter(P_ee[0], P_ee[1], P_ee[2], color='gold', marker='*', s=200, edgecolors='black', zorder=5)
+    ax_robot.quiver(P_ee[0], P_ee[1], P_ee[2], 0, 0, -0.3, color='purple', lw=3, label='Ext Force (-10N)')
+
     # スラスターの描画
     var_tilt_k = [0, 2, 3, 5]
     for k in range(6):
@@ -281,14 +291,14 @@ def draw_scene(val=None):
             ax_robot.quiver(pos[0], pos[1], pos[2], x_axis[0], x_axis[1], x_axis[2], length=0.08, color='gray', lw=1)
             ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (All)', color='black', fontsize=9)
         else:
-            # ★ 変更点：固定スラスター(T2, T5)は赤矢印で描画
+            # 固定スラスター(T2, T5)は赤矢印で描画
             tilt = t2_angle if k == 1 else t5_angle
             n_loc = rot_x(tilt) @ np.array([0, 0, 1])
             n_glob = R_l @ n_loc
             ax_robot.quiver(pos[0], pos[1], pos[2], n_glob[0], n_glob[1], n_glob[2], length=0.15, color='crimson', lw=2)
             ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (Fix)', color='black', fontsize=9)
             
-    ax_robot.set_title("Underwater Robot Model (Base: Link 4)")
+    ax_robot.set_title("Underwater Robot Model (10N Ext. Force on EE)")
     ax_robot.set_xlabel("X [m]"), ax_robot.set_ylabel("Y [m]"), ax_robot.set_zlabel("Z [m]")
     ax_robot.set_xlim(-1.5, 1.5), ax_robot.set_ylim(-1.5, 1.5), ax_robot.set_zlim(-1.5, 1.5)
     ax_robot.grid(True)
@@ -312,7 +322,7 @@ def draw_scene(val=None):
         ax_torque.text(0.5, 0.5, 0.5, "Hovering Impossible", color='red', ha='center', va='center', fontsize=12, transform=ax_torque.transAxes)
         ax_torque.set_xlim(-1, 1), ax_torque.set_ylim(-1, 1), ax_torque.set_zlim(-1, 1)
 
-    ax_torque.set_title("Minkowski Sum Torque Space (All Combinations)")
+    ax_torque.set_title("Minkowski Sum Torque Space (Under 10N Load)")
     ax_torque.set_xlabel("Torque Mx [Nm]"), ax_torque.set_ylabel("Torque My [Nm]"), ax_torque.set_zlabel("Torque Mz [Nm]")
     
     fig.canvas.draw_idle()

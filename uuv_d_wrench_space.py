@@ -8,9 +8,9 @@ from scipy.optimize import linprog
 # 1. 物理パラメータ・構成設定
 # ==========================================
 # 7リンクのパラメータ: 長さ[m], 質量[kg], 体積[m^3]
-link_lengths = [0.2, 0.2, 0.25, 0.5, 0.25, 0.2, 0.2]
+link_lengths = [0.15, 0.05, 0.40, 0.35, 0.40, 0.05, 0.15]
 link_masses  = [0.3, 0.3, 0.2, 2.5, 0.2, 0.3, 0.3]
-link_volumes = [0.0005, 0.0004, 0.003, 0.0030, 0.0003, 0.0004, 0.0002] # 浮力調整用
+link_volumes = [0.0008, 0.0005, 0.0005, 0.0030, 0.0005, 0.0005, 0.0008] # 浮力調整用
 
 # 6関節のパラメータ (順序: P, R, P, P, R', 'P')
 joint_types = ['P', 'R', 'P', 'P', 'R', 'P']
@@ -23,7 +23,7 @@ sigma = 0.0036      # ドラグモーメント係数
 thruster_directions = [1, -1, 1, -1, 1, -1] # プロペラ回転方向 (1:CW, -1:CCW)
 
 # 各スラスターの属するリンク
-belonging_links = [0, 1, 3, 3, 5, 6] 
+belonging_links = [0, 2, 2, 4, 4, 6] 
 
 # 環境定数
 rho_water = 1000.0  # 水の密度 [kg/m^3]
@@ -124,10 +124,10 @@ def update_kinematics(joint_angles, tilt_angles, base_rpy):
     thruster_dirs = []
     loc_positions = [
         np.array([link_lengths[0]/2.0, 0, 0]),  # T1: L1 center
-        np.array([link_lengths[1], 0, 0]),      # T2: L2 end
-        np.array([0, 0, 0]),                    # T3: L4 start
-        np.array([link_lengths[3], 0, 0]),      # T4: L4 end
-        np.array([0, 0, 0]),                    # T5: L6 start
+        np.array([0, 0, 0]),      # T2: L2 end
+        np.array([link_lengths[2], 0, 0]),                    # T3: L4 start
+        np.array([0, 0, 0]),      # T4: L4 end
+        np.array([link_lengths[4], 0, 0]),                    # T5: L6 start
         np.array([link_lengths[6]/2.0, 0, 0])   # T6: L7 center
     ]
     

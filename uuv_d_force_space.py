@@ -5,7 +5,7 @@ from scipy.spatial import ConvexHull
 from scipy.optimize import linprog
 
 # ==========================================
-# 1. 物理パラメータ・構成設定
+# 1. 物理パラメータ・構成設定 (仕様はそのまま維持)
 # ==========================================
 # 7リンクのパラメータ: 長さ[m], 質量[kg], 体積[m^3]
 link_lengths = [0.15, 0.05, 0.40, 0.35, 0.40, 0.05, 0.15]
@@ -22,8 +22,7 @@ max_thrust = 15.0   # 各スラスターの最大推力 [N]
 sigma = 0.0036      # ドラグモーメント係数
 thruster_directions = [1, -1, 1, -1, 1, -1] 
 
-# ★ 変更点：各スラスターの属するリンク
-# 0: Link1, 1: Link2, 2: Link3, 3: Link4, 4: Link5, 5: Link6, 6: Link7
+# 各スラスターの属するリンク
 belonging_links = [0, 2, 2, 4, 4, 6] 
 
 # 環境定数
@@ -109,7 +108,6 @@ def update_kinematics(joint_angles, base_rpy):
     tau_b = np.cross(r_CoB - r_CoM, F_b)
     W_env = np.concatenate([F_g + F_b, tau_b])
     
-    # ★ 変更点：スラスターのローカル位置
     thruster_positions = []
     loc_positions = [
         np.array([link_lengths[0]/2.0, 0, 0]),  # T1: Link1 中央
@@ -127,13 +125,13 @@ def update_kinematics(joint_angles, base_rpy):
         
     return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions)
 
-def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env):
+# ★ 変更点：トルク空間から「力空間」の計算へ変更
+def compute_force_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env):
     num_divs = 12
-    # ★ 変更点：1, 3, 4, 6番目のスラスターを可動(全方位)とする
     var_tilt_k = [0, 2, 3, 5] 
     
     num_vars = len(var_tilt_k) * num_divs + 2 
-    A_eq = np.zeros((3, num_vars))
+    F_matrix = np.zeros((3, num_vars))
     M_matrix = np.zeros((3, num_vars))
     A_ub = np.zeros((len(var_tilt_k), num_vars))
     b_ub = np.ones(len(var_tilt_k))
@@ -148,7 +146,6 @@ def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
         p_vec = thr_pos[k] - r_CoM
         
         if k in var_tilt_k:
-            # 任意の角度（全組み合わせの凸包表現）
             for i in range(num_divs):
                 phi = 2 * np.pi * i / num_divs
                 n_local = np.array([0, -np.sin(phi), np.cos(phi)])
@@ -157,14 +154,13 @@ def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
                 F_vec = max_thrust * n_global
                 M_vec = np.cross(p_vec, F_vec) + sigma * thruster_directions[k] * F_vec
                 
-                A_eq[:, var_idx] = F_vec
+                F_matrix[:, var_idx] = F_vec
                 M_matrix[:, var_idx] = M_vec
-                A_ub[ub_idx, var_idx] = 1.0 # 係数の和制約
+                A_ub[ub_idx, var_idx] = 1.0 
                 bounds.append((0, 1.0))
                 var_idx += 1
             ub_idx += 1
         else:
-            # ★ 変更点：固定チルト（T2, T5）
             tilt = t2_angle if k == 1 else t5_angle
             n_local = rot_x(tilt) @ np.array([0, 0, 1])
             n_global = R_l @ n_local
@@ -172,47 +168,51 @@ def compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
             F_unit = n_global
             M_unit = np.cross(p_vec, F_unit) + sigma * thruster_directions[k] * F_unit
             
-            A_eq[:, var_idx] = F_unit
+            F_matrix[:, var_idx] = F_unit
             M_matrix[:, var_idx] = M_unit
-            bounds.append((-max_thrust, max_thrust)) # 両方向推力
+            bounds.append((-max_thrust, max_thrust)) 
             var_idx += 1
             
-    b_eq = -W_env[:3]
-    tau_env = W_env[3:]
+    # ★ 等号制約：ネットトルク（モーメント）が完全にゼロになる条件を指定
+    A_eq = M_matrix
+    b_eq = -W_env[3:]  # 環境モーメントを相殺する条件
+    F_env = W_env[:3]  # 環境力（重力＋浮力）
     
-    # 空間のサンプリング
+    # 空間のサンプリング（力空間の探索へ変更）
     n_phi, n_theta = 14, 7
     phi_vals = np.linspace(0, 2*np.pi, n_phi)
     theta_vals = np.linspace(-np.pi/2, np.pi/2, n_theta)
-    torque_points = []
+    force_points = []
     
     for phi in phi_vals:
         for theta in theta_vals:
-            n_tau = np.array([np.cos(theta)*np.cos(phi), np.cos(theta)*np.sin(phi), np.sin(theta)])
-            c = - M_matrix.T @ n_tau
+            # 探索する「力」の方向ベクトル
+            n_f = np.array([np.cos(theta)*np.cos(phi), np.cos(theta)*np.sin(phi), np.sin(theta)])
+            c = - F_matrix.T @ n_f  # 指定した方向の力を最大化
             
             res = linprog(c, A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
             if res.success:
-                M_net = M_matrix @ res.x + tau_env
-                torque_points.append(M_net)
+                # トルクゼロの制約を満たした状態で発生する「正味の力」
+                F_net = F_matrix @ res.x + F_env
+                force_points.append(F_net)
                 
-    if len(torque_points) < 4: return None
-    torque_points = np.unique(np.round(torque_points, 5), axis=0)
-    if len(torque_points) < 4: return None
+    if len(force_points) < 4: return None
+    force_points = np.unique(np.round(force_points, 5), axis=0)
+    if len(force_points) < 4: return None
     
     try:
-        return ConvexHull(torque_points)
+        return ConvexHull(force_points)
     except:
         return None
 
 # ==========================================
-# 3. GUI & 可視化システム
+# 3. GUI & 可的可視化システム
 # ==========================================
 fig = plt.figure(figsize=(16, 9))
 plt.subplots_adjust(bottom=0.35, left=0.05, right=0.95, wspace=0.2)
 
 ax_robot = fig.add_subplot(121, projection='3d')
-ax_torque = fig.add_subplot(122, projection='3d')
+ax_force = fig.add_subplot(122, projection='3d') # 力空間用の表示アクス
 
 # スライダーの配置
 sliders_j = []
@@ -221,7 +221,6 @@ for i in range(6):
     lim = joint_limits[i]
     sliders_j.append(Slider(ax_sj, f'Joint {i+1} ({joint_types[i]})', lim[0], lim[1], valinit=0.0, valfmt='%1.1f°'))
     
-# ★ 変更点：右側のスライダー (固定チルト T2 と T5 + ベース姿勢)
 ax_t2 = plt.axes([0.55, 0.28, 0.35, 0.02])
 slider_t2 = Slider(ax_t2, 'Tilt 2 (Fixed)', -180.0, 180.0, valinit=0.0, valfmt='%1.1f°')
 ax_t5 = plt.axes([0.55, 0.24, 0.35, 0.02])
@@ -236,7 +235,7 @@ slider_yaw = Slider(ax_y, 'Base4 Yaw', -180.0, 180.0, valinit=0.0, valfmt='%1.1f
 
 def draw_scene(val=None):
     ax_robot.cla()
-    ax_torque.cla()
+    ax_force.cla()
     
     j_angles = [np.radians(s.val) for s in sliders_j]
     t2_angle = np.radians(slider_t2.val)
@@ -244,7 +243,8 @@ def draw_scene(val=None):
     base_rpy = [np.radians(slider_roll.val), np.radians(slider_pitch.val), np.radians(slider_yaw.val)]
     
     link_frames, j_pos, r_CoM, r_CoB, W_env, thr_pos = update_kinematics(j_angles, base_rpy)
-    hull = compute_torque_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
+    # ★ 変更点：力空間を計算
+    hull = compute_force_space(r_CoM, link_frames, thr_pos, t2_angle, t5_angle, W_env)
     
     # --- 左画面: ロボットモデル ---
     for i in range(7):
@@ -260,14 +260,12 @@ def draw_scene(val=None):
     ax_robot.scatter(r_CoM[0], r_CoM[1], r_CoM[2], color='red', marker='x', s=100, lw=3, label='CoM')
     ax_robot.scatter(r_CoB[0], r_CoB[1], r_CoB[2], color='cyan', marker='o', s=100, edgecolors='b', label='CoB')
     
-    # スラスターの描画
     var_tilt_k = [0, 2, 3, 5]
     for k in range(6):
         R_l, P_l = link_frames[belonging_links[k]]
         pos = thr_pos[k]
         
         if k in var_tilt_k:
-            # 任意の角度に向けるスラスターはピンクの円盤（ディスク）として描画
             circle_pts = []
             for i in range(13):
                 phi = 2 * np.pi * i / 12
@@ -281,7 +279,6 @@ def draw_scene(val=None):
             ax_robot.quiver(pos[0], pos[1], pos[2], x_axis[0], x_axis[1], x_axis[2], length=0.08, color='gray', lw=1)
             ax_robot.text(pos[0], pos[1], pos[2], f' T{k+1} (All)', color='black', fontsize=9)
         else:
-            # ★ 変更点：固定スラスター(T2, T5)は赤矢印で描画
             tilt = t2_angle if k == 1 else t5_angle
             n_loc = rot_x(tilt) @ np.array([0, 0, 1])
             n_glob = R_l @ n_loc
@@ -294,26 +291,26 @@ def draw_scene(val=None):
     ax_robot.grid(True)
     ax_robot.legend(loc='upper left')
     
-    # --- 右画面: トルク空間 ---
+    # --- 右画面: 力空間 (変更点：タイトルやラベルを力仕様にアップデート) ---
     if hull is not None:
-        ax_torque.plot_trisurf(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2],
-                               triangles=hull.simplices, alpha=0.4, color='turquoise', edgecolor='teal', linewidth=0.5)
-        ax_torque.scatter(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2], s=10, color='darkcyan')
-        ax_torque.scatter(0, 0, 0, color='magenta', marker='*', s=150, label='Net Zero Torque')
-        ax_torque.legend()
+        ax_force.plot_trisurf(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2],
+                               triangles=hull.simplices, alpha=0.4, color='orange', edgecolor='teal', linewidth=0.5)
+        ax_force.scatter(hull.points[:, 0], hull.points[:, 1], hull.points[:, 2], s=10, color='darkcyan')
+        ax_force.scatter(0, 0, 0, color='magenta', marker='*', s=150, label='Net Zero Force')
+        ax_force.legend()
         
         pts = hull.points
         max_range = np.array([pts[:,0].max()-pts[:,0].min(), pts[:,1].max()-pts[:,1].min(), pts[:,2].max()-pts[:,2].min()]).max() / 2.0 + 0.1
         mid_x, mid_y, mid_z = (pts[:,0].max()+pts[:,0].min())*0.5, (pts[:,1].max()+pts[:,1].min())*0.5, (pts[:,2].max()+pts[:,2].min())*0.5
-        ax_torque.set_xlim(mid_x - max_range, mid_x + max_range)
-        ax_torque.set_ylim(mid_y - max_range, mid_y + max_range)
-        ax_torque.set_zlim(mid_z - max_range, mid_z + max_range)
+        ax_force.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax_force.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax_force.set_zlim(mid_z - max_range, mid_z + max_range)
     else:
-        ax_torque.text(0.5, 0.5, 0.5, "Hovering Impossible", color='red', ha='center', va='center', fontsize=12, transform=ax_torque.transAxes)
-        ax_torque.set_xlim(-1, 1), ax_torque.set_ylim(-1, 1), ax_torque.set_zlim(-1, 1)
+        ax_force.text(0.5, 0.5, 0.5, "Force Generation Impossible", color='red', ha='center', va='center', fontsize=12, transform=ax_force.transAxes)
+        ax_force.set_xlim(-1, 1), ax_force.set_ylim(-1, 1), ax_force.set_zlim(-1, 1)
 
-    ax_torque.set_title("Minkowski Sum Torque Space (All Combinations)")
-    ax_torque.set_xlabel("Torque Mx [Nm]"), ax_torque.set_ylabel("Torque My [Nm]"), ax_torque.set_zlabel("Torque Mz [Nm]")
+    ax_force.set_title("Feasible Force Space (Net Zero Torque)")
+    ax_force.set_xlabel("Force Fx [N]"), ax_force.set_ylabel("Force Fy [N]"), ax_force.set_zlabel("Force Fz [N]")
     
     fig.canvas.draw_idle()
 
