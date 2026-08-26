@@ -51,17 +51,17 @@ def rot_rpy(r, p, y):
 # ==========================================
 def update_kinematics(joint_angles, tilt_angles, base_rpy):
     # --- Step 1: Link1を原点とした仮の順運動学を計算 ---
-    tmp_link_frames = []
-    tmp_joint_positions = []
-    tmp_link_centers = []
+    tmp_link_frames = [] # リンク姿勢
+    tmp_joint_positions = [] #リンク始点位置
+    tmp_link_centers = [] # リンク中心位置
     
     R = np.eye(3)
     P = np.array([0.0, 0.0, 0.0])
     
     for i in range(7):
-        tmp_link_frames.append((R.copy(), P.copy()))
-        P_center = P + R @ np.array([link_lengths[i]/2.0, 0, 0])
-        tmp_link_centers.append(P_center)
+        tmp_link_frames.append((R.copy(), P.copy())) # リンク始点の姿勢と位置を保存
+        P_center = P + R @ np.array([link_lengths[i]/2.0, 0, 0]) # リンク中心位置を計算
+        tmp_link_centers.append(P_center) # リンク中心位置をリストに保存
         
         if i < 6:
             P_joint = P + R @ np.array([link_lengths[i], 0, 0])
@@ -79,7 +79,7 @@ def update_kinematics(joint_angles, tilt_angles, base_rpy):
             
     # --- Step 2: 第4リンク(インデックス3)を基準位置・姿勢に変換 ---
     R_link4_tmp, P_link4_tmp = tmp_link_frames[3]
-    R_base_desired = rot_rpy(base_rpy[0], base_rpy[1], base_rpy[2])
+    R_base_desired = rot_rpy(base_rpy[0], base_rpy[1], base_rpy[2]) # 目標姿勢の回転行列
     
     # 第4リンクの姿勢を目標姿勢にするためのグローバル変換行列
     R_global = R_base_desired @ R_link4_tmp.T
@@ -90,7 +90,6 @@ def update_kinematics(joint_angles, tilt_angles, base_rpy):
     link_frames = []
     link_centers = []
     joint_positions = []
-    
     for i in range(7):
         R_orig, P_orig = tmp_link_frames[i]
         R_new = R_global @ R_orig
@@ -104,20 +103,20 @@ def update_kinematics(joint_angles, tilt_angles, base_rpy):
     # --- Step 3: 重心 (CoM) と 浮心 (CoB) の計算 ---
     total_mass = sum(link_masses) + sum(actuator_masses)
     com_num = np.zeros(3)
-    for i in range(7): com_num += link_masses[i] * link_centers[i]
-    for j in range(6): com_num += actuator_masses[j] * joint_positions[j]
+    for i in range(7): com_num += link_masses[i] * link_centers[i] # リンク質量による重心寄与(リンク中心位置)
+    for j in range(6): com_num += actuator_masses[j] * joint_positions[j] # アクチュエータ質量による重心寄与(関節位置)
     r_CoM = com_num / total_mass
     
     total_volume = sum(link_volumes)
     cob_num = np.zeros(3)
-    for i in range(7): cob_num += link_volumes[i] * link_centers[i]
+    for i in range(7): cob_num += link_volumes[i] * link_centers[i] # リンク体積による浮心寄与(リンク中心位置)
     r_CoB = cob_num / total_volume
     
     # 環境レンチ (重力 + 浮力)
-    F_g = np.array([0, 0, -total_mass * g_const])
-    F_b = np.array([0, 0, rho_water * g_const * total_volume])
-    tau_b = np.cross(r_CoB - r_CoM, F_b)
-    W_env = np.concatenate([F_g + F_b, tau_b])
+    F_g = np.array([0, 0, -total_mass * g_const]) # 重力による力
+    F_b = np.array([0, 0, rho_water * g_const * total_volume]) # 浮力による力
+    tau_b = np.cross(r_CoB - r_CoM, F_b) # 重力と浮力による復元トルク
+    W_env = np.concatenate([F_g + F_b, tau_b]) # 環境レンチ (6次元ベクトル)
     
     # --- Step 4: スラスターの位置と推力方向 ---
     thruster_positions = []
@@ -129,15 +128,15 @@ def update_kinematics(joint_angles, tilt_angles, base_rpy):
         np.array([0, 0, 0]),      # T4: L4 end
         np.array([link_lengths[4], 0, 0]),                    # T5: L6 start
         np.array([link_lengths[6]/2.0, 0, 0])   # T6: L7 center
-    ]
+    ]# スラスターの位置の記述方法
     
     for k in range(6):
-        l_idx = belonging_links[k]
-        R_l, P_l = link_frames[l_idx]
+        l_idx = belonging_links[k] # スラスターkが属するリンクのインデックス
+        R_l, P_l = link_frames[l_idx] # スラスターkが属するリンクの姿勢と位置
         
         thruster_positions.append(P_l + R_l @ loc_positions[k])
         # チルト軸はローカルX軸
-        n_local = rot_x(tilt_angles[k]) @ np.array([0, 0, 1])
+        n_local = rot_x(tilt_angles[k]) @ np.array([0, 0, 1]) # ローカルZ軸をチルト角で回転させた方向
         thruster_dirs.append(R_l @ n_local)
         
     return link_frames, joint_positions, r_CoM, r_CoB, W_env, np.array(thruster_positions), np.array(thruster_dirs)
