@@ -88,22 +88,24 @@ def main():
     print("リーチアビリティマップを生成中...")
     cloud_points = robot.generate_reachability_map(num_samples=10000)
     
-    # 描画ウィンドウの設定（スライダーのスペースを確保するため縦に少し長く、余白を調整）
     fig = plt.figure(figsize=(10, 9))
-    # 3Dプロットエリア（下部30%をスライダー用に空ける）
     ax = fig.add_axes([0.05, 0.35, 0.9, 0.6], projection='3d')
     
-    # マップのプロット
-    ax.scatter(cloud_points[:, 0], cloud_points[:, 1], cloud_points[:, 2], 
-               c='c', s=1, alpha=0.1, label='Reachability Map')
+    # 1. 原点からの距離に応じたグラデーションカラー（viridis）を適用し、視認性を向上
+    distances = np.linalg.norm(cloud_points, axis=1)
+    scatter = ax.scatter(cloud_points[:, 0], cloud_points[:, 1], cloud_points[:, 2], 
+                         c=distances, cmap='viridis', s=2, alpha=0.3, label='Reachability Map')
     
+    # カラーバーの追加
+    cbar = fig.colorbar(scatter, ax=ax, shrink=0.5, aspect=10, pad=0.08)
+    cbar.set_label('Distance from Origin [m]')
+
     # 初期姿勢の計算
     zero_angles = [0.0] * 6
     robot_positions = robot.forward_kinematics(zero_angles)
     xs, ys, zs = robot_positions[:, 0], robot_positions[:, 1], robot_positions[:, 2]
     
-    # --- ロボットの描画オブジェクトを保持する ---
-    # （後でGUIから座標データを更新するため、変数に格納しておきます）
+    # ロボットリンクのプロット
     base_line, = ax.plot(xs[0:2], ys[0:2], zs[0:2], color='gray', 
                          linewidth=base_link['radius']*100, solid_capstyle='round', label='Base Link')
     
@@ -114,15 +116,19 @@ def main():
                         linewidth=segments[i]['radius']*100, solid_capstyle='round')
         link_lines.append(line)
         
-    # 関節位置の球（点）は更新を容易にするため scatter ではなく plot を使用
-    joint_points, = ax.plot(xs[1:], ys[1:], zs[1:], color='black', marker='o', 
+    # 中間関節のプロット
+    joint_points, = ax.plot(xs[1:-1], ys[1:-1], zs[1:-1], color='black', marker='o', 
                             linestyle='None', markersize=6, zorder=5)
     
-    # グラフの見た目を整える
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title('6-DOF Manipulator Interactive Simulator')
+    # 2. エンドエフェクタ（先端位置）を赤色で独立して強調表示
+    ee_point, = ax.plot([xs[-1]], [ys[-1]], [zs[-1]], color='red', marker='o', 
+                        linestyle='None', markersize=10, label='End-Effector', zorder=6)
+    
+    # 軸ラベルとタイトル
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_zlabel('Z [m]')
+    ax.set_title('6-DOF Manipulator Interactive Reachability Map')
     
     # アスペクト比の固定
     max_range = np.array([cloud_points[:, 0].max()-cloud_points[:, 0].min(),
@@ -136,49 +142,42 @@ def main():
     ax.set_zlim(mid_z - max_range, mid_z + max_range)
     ax.legend(loc='upper left')
 
-    # --- GUIスライダーの設定 ---
-    ax_sliders = []
+    # GUIスライダーの設定
     sliders = []
     slider_height = 0.03
     margin_bottom = 0.25
     
     for i, seg in enumerate(segments):
-        # スライダー用のAxesを作成
         sax = fig.add_axes([0.2, margin_bottom - i*(slider_height + 0.01), 0.6, slider_height])
         min_deg = np.rad2deg(seg['limits'][0])
         max_deg = np.rad2deg(seg['limits'][1])
         
-        # スライダーの作成（初期値は0度）
         slider = Slider(sax, f'Joint {i+1} ({seg["axis"]}) [deg]', min_deg, max_deg, valinit=0.0)
-        ax_sliders.append(sax)
         sliders.append(slider)
 
-    # スライダーが変更されたときに呼ばれる関数
+    # スライダー更新時のコールバック関数
     def update(val):
-        # スライダーの値（度）をラジアンに変換して取得
         current_angles = [np.deg2rad(s.val) for s in sliders]
         
-        # 新しい姿勢を計算
         new_positions = robot.forward_kinematics(current_angles)
         nx, ny, nz = new_positions[:, 0], new_positions[:, 1], new_positions[:, 2]
         
-        # ベースラインの更新（固定ですが念のため）
         base_line.set_data(nx[0:2], ny[0:2])
         base_line.set_3d_properties(nz[0:2])
         
-        # リンクの更新
         for i, line in enumerate(link_lines):
             line.set_data(nx[i+1:i+3], ny[i+1:i+3])
             line.set_3d_properties(nz[i+1:i+3])
             
-        # 関節位置（黒い点）の更新
-        joint_points.set_data(nx[1:], ny[1:])
-        joint_points.set_3d_properties(nz[1:])
+        joint_points.set_data(nx[1:-1], ny[1:-1])
+        joint_points.set_3d_properties(nz[1:-1])
         
-        # 描画の更新
+        # 3. スライダー操作時にエンドエフェクタ赤丸の位置も追従・更新
+        ee_point.set_data([nx[-1]], [ny[-1]])
+        ee_point.set_3d_properties([nz[-1]])
+        
         fig.canvas.draw_idle()
 
-    # 各スライダーに変更イベントを紐付け
     for s in sliders:
         s.on_changed(update)
 

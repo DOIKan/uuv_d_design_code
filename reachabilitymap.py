@@ -101,15 +101,15 @@ def main():
     # 関節1〜6 と リンク1〜6
     segments = [
         # 関節1: Pitch (Z軸が上を向いている状態で左右の首振り)
-        {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.2, 'radius': 0.1},
+        {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.05, 'radius': 0.1},
         # 関節2: Roll (上下の振る舞い)
-        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.25, 'radius': 0.1},
+        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.45, 'radius': 0.1},
         # 関節3: Pitch
         {'axis': 'pitch', 'limits': (np.deg2rad(-90), np.deg2rad(90)), 'length': 0.5, 'radius': 0.1},
         # 関節4: Pitch (腕のひねり)
-        {'axis': 'pitch', 'limits': (np.deg2rad(-90), np.deg2rad(90)), 'length': 0.25, 'radius': 0.10},
+        {'axis': 'pitch', 'limits': (np.deg2rad(-90), np.deg2rad(90)), 'length': 0.45, 'radius': 0.10},
         # 関節5: Roll (手首の上下)
-        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.2, 'radius': 0.1},
+        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.05, 'radius': 0.1},
         # 関節6: Pitch (手首の回転)
         {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.2, 'radius': 0.1},
     ]

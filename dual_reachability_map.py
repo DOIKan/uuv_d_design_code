@@ -97,15 +97,15 @@ def main():
     # 元の6リンクを左（1〜3番目）と右（4〜6番目）に分割して割り当て
     # ※もし左右を完全対称な同じ長さにしたい場合は、両方に同じリストを渡してください。
     left_segments = [
-        {'axis': 'pitch', 'limits': (np.deg2rad(-210), np.deg2rad(30)), 'length': 0.2, 'radius': 0.1},
-        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.2, 'radius': 0.1},
-        {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.25, 'radius': 0.1},
+        {'axis': 'pitch', 'limits': (np.deg2rad(-210), np.deg2rad(30)), 'length': 0.45, 'radius': 0.1},
+        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.05, 'radius': 0.1},
+        {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.2, 'radius': 0.1},
     ]
     
     right_segments = [
-        {'axis': 'pitch', 'limits': (np.deg2rad(-30), np.deg2rad(210)), 'length': 0.25, 'radius': 0.10},
-        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.2, 'radius': 0.1},
-        {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.2, 'radius': 0.1},
+        {'axis': 'pitch', 'limits': (np.deg2rad(-30), np.deg2rad(210)), 'length': 0.45, 'radius': 0.1},
+        {'axis': 'roll', 'limits': (np.deg2rad(-180), np.deg2rad(180)), 'length': 0.05, 'radius': 0.1},
+        {'axis': 'pitch', 'limits': (np.deg2rad(-135), np.deg2rad(135)), 'length': 0.2, 'radius': 0.1},                                                                                                                                                         
     ]
     
     robot = DualArmManipulator(base_length, base_radius, left_segments, right_segments)
@@ -117,8 +117,8 @@ def main():
     ax = fig.add_axes([0.05, 0.35, 0.9, 0.6], projection='3d')
     
     # リーチアビリティマップ
-    ax.scatter(left_cloud[:, 0], left_cloud[:, 1], left_cloud[:, 2], c='c', s=2, alpha=0.15, label='Left Map')
-    ax.scatter(right_cloud[:, 0], right_cloud[:, 1], right_cloud[:, 2], c='m', s=2, alpha=0.15, label='Right Map')
+    ax.scatter(left_cloud[:, 0], left_cloud[:, 1], left_cloud[:, 2], c='c', s=2, alpha=0.3, label='Left Map')
+    ax.scatter(right_cloud[:, 0], right_cloud[:, 1], right_cloud[:, 2], c='m', s=2, alpha=0.3, label='Right Map')
     
     zero_angles_l = [0.0] * len(left_segments)
     zero_angles_r = [0.0] * len(right_segments)
